@@ -312,6 +312,25 @@ class SpaceInvadersPainter extends CustomPainter {
         size.height / 2 - textPainter.height / 2,
       ),
     );
+
+    final subPainter = TextPainter(
+      text: const TextSpan(
+        text: 'Tap to restart',
+        style: TextStyle(
+          color: Colors.white54,
+          fontSize: 20,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    );
+    subPainter.layout();
+    subPainter.paint(
+      canvas,
+      Offset(
+        size.width / 2 - subPainter.width / 2,
+        size.height / 2 + textPainter.height / 2 + 16,
+      ),
+    );
   }
 
   @override

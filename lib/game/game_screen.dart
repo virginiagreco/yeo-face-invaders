@@ -1,11 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:camera/camera.dart';
+import 'package:permission_handler/permission_handler.dart';
 import '../integration/recognition_bridge.dart';
 import '../recognition/recognition_engine.dart';
 import '../enrolment/face_enrolment_service.dart';
 import 'space_invaders_game.dart';
-import 'package:permission_handler/permission_handler.dart';
 
 class GameScreen extends StatefulWidget {
   final List<CameraDescription> cameras;
@@ -18,17 +18,14 @@ class GameScreen extends StatefulWidget {
 
 class _GameScreenState extends State<GameScreen>
     with SingleTickerProviderStateMixin {
-  // Game
   final SpaceInvadersGame _game = SpaceInvadersGame();
   Ticker? _ticker;
   Duration _lastElapsed = Duration.zero;
 
-  // Recognition
   late RecognitionEngine _recognitionEngine;
   late RecognitionBridge _bridge;
   CameraController? _cameraController;
 
-  // State
   bool _isRecognised = false;
   double _playerMoveDirection = 0.0;
 
@@ -36,18 +33,15 @@ class _GameScreenState extends State<GameScreen>
   void initState() {
     super.initState();
     _bridge = RecognitionBridge();
-   // _isRecognised = true; // Bypass for emulator testing
     _recognitionEngine = RecognitionEngine(
       bridge: _bridge,
       enrolmentService: FaceEnrolmentService(),
     );
 
-    // Listen to recognition state changes (FR-23 to FR-26)
     _bridge.stream.listen((state) {
       if (!mounted) return;
       setState(() => _isRecognised = state.isRecognised);
 
-      // Check 60 second timeout (FR-29)
       if (_recognitionEngine.shouldTerminateSession) {
         _terminateSession();
       }
@@ -55,18 +49,16 @@ class _GameScreenState extends State<GameScreen>
 
     _initRecognition();
 
-    // Game ticker — drives the game loop at 60fps (FR-21)
     _ticker = createTicker(_onTick)..start();
   }
 
-    Future<void> _initRecognition() async {
+  Future<void> _initRecognition() async {
     try {
-    // Request camera permission (NF-06)
-    final status = await Permission.camera.request();
-    if (!status.isGranted) return;
-      // Wait for enrolment camera to fully release
+      final status = await Permission.camera.request();
+      if (!status.isGranted) return;
+
       await Future.delayed(const Duration(milliseconds: 500));
-      
+
       await _recognitionEngine.initialise();
 
       final frontCamera = widget.cameras.firstWhere(
@@ -82,13 +74,12 @@ class _GameScreenState extends State<GameScreen>
       );
 
       await _cameraController!.initialize();
-      _recognitionEngine.startProcessing(_cameraController!);
+      _recognitionEngine.startProcessing(_cameraController!, frontCamera);
     } catch (e) {
-      // Camera stop errors ignored on dispose      
+      // Camera errors ignored on dispose
     }
   }
 
-  // Game loop — called every frame by the Ticker (FR-22)
   void _onTick(Duration elapsed) {
     if (_lastElapsed == Duration.zero) {
       _lastElapsed = elapsed;
@@ -98,25 +89,29 @@ class _GameScreenState extends State<GameScreen>
     final dt = (elapsed - _lastElapsed).inMicroseconds / 1000000.0;
     _lastElapsed = elapsed;
 
-    // Only update game if recognised (FR-23)
     if (_isRecognised && !_game.gameOver) {
       _game.update(dt);
       _game.movePlayer(_playerMoveDirection, dt);
     }
 
-    setState(() {}); // Trigger repaint
+    setState(() {});
   }
 
-  // Session terminated after 60s unrecognised (FR-29)
-  void _terminateSession() {
+  void _terminateSession() async {
+    _ticker?.stop();
     if (_cameraController != null) {
       try {
         _recognitionEngine.stopProcessing(_cameraController!);
+        await _cameraController!.stopImageStream();
+        await _cameraController!.dispose();
+        _cameraController = null;
       } catch (_) {}
     }
-    Navigator.of(context).pushReplacementNamed('/enrolment');
+    await Future.delayed(const Duration(milliseconds: 1500));
+    if (mounted) {
+      Navigator.of(context).pushReplacementNamed('/enrolment');
+    }
   }
-
   @override
   void dispose() {
     _ticker?.dispose();
@@ -137,12 +132,11 @@ class _GameScreenState extends State<GameScreen>
       body: SafeArea(
         child: LayoutBuilder(
           builder: (context, constraints) {
-            // Initialise game with screen dimensions
             if (_game.screenWidth == 0) {
-              _game.initialise(constraints.maxWidth, constraints.maxHeight - 80);
+              _game.initialise(
+                  constraints.maxWidth, constraints.maxHeight - 80);
             }
 
-            // FR-24, FR-25: Blank screen when not recognised
             if (!_isRecognised) {
               return _buildPausedScreen();
             }
@@ -154,7 +148,6 @@ class _GameScreenState extends State<GameScreen>
     );
   }
 
-  // Blanked screen — shown when face not detected (FR-24, FR-25)
   Widget _buildPausedScreen() {
     return Container(
       color: Colors.black,
@@ -177,23 +170,25 @@ class _GameScreenState extends State<GameScreen>
   Widget _buildGameScreen(BoxConstraints constraints) {
     return Column(
       children: [
-        // Game canvas
         Expanded(
           child: GestureDetector(
-            onTapDown: (_) => _game.shoot(),
+            onTapDown: (_) {
+              if (_game.gameOver) {
+                setState(() => _game.reset());
+              } else {
+                _game.shoot();
+              }
+            },
             child: CustomPaint(
               painter: SpaceInvadersPainter(_game),
               size: Size(constraints.maxWidth, constraints.maxHeight - 80),
             ),
           ),
         ),
-
-        // Touch controls (FR-16)
         SizedBox(
           height: 80,
           child: Row(
             children: [
-              // Move left
               Expanded(
                 child: GestureDetector(
                   onTapDown: (_) => _playerMoveDirection = -1.0,
@@ -206,8 +201,6 @@ class _GameScreenState extends State<GameScreen>
                   ),
                 ),
               ),
-
-              // Fire button
               GestureDetector(
                 onTap: () => _game.shoot(),
                 child: Container(
@@ -217,8 +210,6 @@ class _GameScreenState extends State<GameScreen>
                       color: Colors.redAccent, size: 40),
                 ),
               ),
-
-              // Move right
               Expanded(
                 child: GestureDetector(
                   onTapDown: (_) => _playerMoveDirection = 1.0,

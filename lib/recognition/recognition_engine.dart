@@ -17,6 +17,7 @@ class RecognitionEngine {
   Interpreter? _interpreter;
   FaceDetector? _faceDetector;
   FaceEmbedding? _enrolledEmbedding;
+  CameraDescription? _cameraDescription;
 
   int _missedFrameCount = 0;
   static const int _debounceThreshold = 3;
@@ -25,6 +26,7 @@ class RecognitionEngine {
   bool _isRunning = false;
   bool _isProcessingFrame = false;
   DateTime? _notRecognisedSince;
+  DateTime? _faceLastSeen;
 
   RecognitionEngine({
     required RecognitionBridge bridge,
@@ -60,10 +62,26 @@ class RecognitionEngine {
     }
   }
 
-  void startProcessing(CameraController cameraController) {
-    if (_isRunning) {
-      return;
+  InputImageRotation _getRotation() {
+    final orientation = _cameraDescription?.sensorOrientation ?? 270;
+    switch (orientation) {
+      case 90:
+        return InputImageRotation.rotation90deg;
+      case 180:
+        return InputImageRotation.rotation180deg;
+      case 270:
+        return InputImageRotation.rotation270deg;
+      default:
+        return InputImageRotation.rotation0deg;
     }
+  }
+
+  void startProcessing(
+    CameraController cameraController,
+    CameraDescription cameraDescription,
+  ) {
+    _cameraDescription = cameraDescription;
+    if (_isRunning) return;
     _isRunning = true;
 
     cameraController.startImageStream((CameraImage frame) async {
@@ -93,13 +111,9 @@ class RecognitionEngine {
       }
 
       final inputImage = _convertToInputImage(frame);
-      if (inputImage == null) {
-        return;
-      }
+      if (inputImage == null) return;
 
-      if (_faceDetector == null) {
-        return;
-      }
+      if (_faceDetector == null) return;
 
       final faces = await _faceDetector!.processImage(inputImage);
 
@@ -108,11 +122,12 @@ class RecognitionEngine {
         return;
       }
 
+      // Face is present — reset missed frame tracking
+      _faceLastSeen ??= DateTime.now();
       _missedFrameCount = 0;
 
       final face = faces.reduce((a, b) =>
           a.boundingBox.width > b.boundingBox.width ? a : b);
-
 
       if (!_isFaceQualityAcceptable(face)) {
         _handleNoFace();
@@ -120,6 +135,7 @@ class RecognitionEngine {
       }
 
       if (frame.planes.length == 1) {
+        _faceLastSeen = DateTime.now();
         _missedFrameCount = 0;
         _notRecognisedSince = null;
         _updateState(RecognitionStatus.recognised, 1.0);
@@ -127,6 +143,7 @@ class RecognitionEngine {
       }
 
       if (_interpreter == null) {
+        _faceLastSeen = DateTime.now();
         _missedFrameCount = 0;
         _notRecognisedSince = null;
         _updateState(RecognitionStatus.recognised, 1.0);
@@ -134,13 +151,12 @@ class RecognitionEngine {
       }
 
       final embedding = await _extractEmbedding(frame, face);
-      if (embedding == null) {
-        return;
-      }
+      if (embedding == null) return;
 
       final similarity = embedding.cosineSimilarity(_enrolledEmbedding!);
 
       if (similarity >= _confidenceThreshold) {
+        _faceLastSeen = DateTime.now();
         _missedFrameCount = 0;
         _notRecognisedSince = null;
         _updateState(RecognitionStatus.recognised, similarity);
@@ -152,9 +168,13 @@ class RecognitionEngine {
     }
   }
 
+  // Remove _faceLastSeen ??= DateTime.now() from _handleNoFace
   void _handleNoFace() {
     _missedFrameCount++;
     if (_missedFrameCount >= _debounceThreshold) {
+      if (_faceLastSeen != null) {
+        _faceLastSeen = null;
+      }
       _notRecognisedSince ??= DateTime.now();
       _updateState(RecognitionStatus.notRecognised, 0.0);
     }
@@ -187,6 +207,7 @@ class RecognitionEngine {
     try {
       final int width = frame.width;
       final int height = frame.height;
+      final rotation = _getRotation();
 
       if (frame.planes.length == 1) {
         final format = InputImageFormatValue.fromRawValue(frame.format.raw);
@@ -195,7 +216,7 @@ class RecognitionEngine {
           bytes: frame.planes[0].bytes,
           metadata: InputImageMetadata(
             size: Size(width.toDouble(), height.toDouble()),
-            rotation: InputImageRotation.rotation0deg,
+            rotation: rotation,
             format: format,
             bytesPerRow: frame.planes[0].bytesPerRow,
           ),
@@ -226,7 +247,7 @@ class RecognitionEngine {
         bytes: nv21,
         metadata: InputImageMetadata(
           size: Size(width.toDouble(), height.toDouble()),
-          rotation: InputImageRotation.rotation0deg,
+          rotation: rotation,
           format: InputImageFormat.nv21,
           bytesPerRow: width,
         ),
@@ -251,7 +272,7 @@ class RecognitionEngine {
 
       return FaceEmbedding(List<double>.from(output[0]));
     } catch (e) {
-        return null;
+      return null;
     }
   }
 
@@ -293,7 +314,9 @@ class RecognitionEngine {
           final int vVal = vPlane[uvIndex] - 128;
 
           int r = (yVal + 1.402 * vVal).round().clamp(0, 255);
-          int g = (yVal - 0.344136 * uVal - 0.714136 * vVal).round().clamp(0, 255);
+          int g = (yVal - 0.344136 * uVal - 0.714136 * vVal)
+              .round()
+              .clamp(0, 255);
           int b = (yVal + 1.772 * uVal).round().clamp(0, 255);
 
           image.setPixelRgb(x, y, r, g, b);

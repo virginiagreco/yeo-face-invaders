@@ -4,9 +4,9 @@ import 'package:camera/camera.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 import 'package:tflite_flutter/tflite_flutter.dart';
 import 'package:image/image.dart' as img;
+import 'package:permission_handler/permission_handler.dart';
 import 'face_enrolment_service.dart';
 import '../recognition/face_embedding.dart';
-import 'package:permission_handler/permission_handler.dart';
 
 class EnrolmentScreen extends StatefulWidget {
   final List<CameraDescription> cameras;
@@ -19,17 +19,21 @@ class EnrolmentScreen extends StatefulWidget {
 
 class _EnrolmentScreenState extends State<EnrolmentScreen> {
   CameraController? _cameraController;
+  CameraDescription? _frontCamera;
   Interpreter? _interpreter;
   final FaceEnrolmentService _enrolmentService = FaceEnrolmentService();
   final FaceDetector _faceDetector = FaceDetector(
     options: FaceDetectorOptions(
-      performanceMode: FaceDetectorMode.fast,
+      enableClassification: true,
+      enableLandmarks: true,
+      performanceMode: FaceDetectorMode.accurate,
       minFaceSize: 0.15,
     ),
   );
 
   List<FaceEmbedding> _capturedEmbeddings = [];
   static const int _requiredSamples = 3;
+  static const double _minimumQuality = 0.6;
   bool _isCapturing = false;
   bool _isFaceDetected = false;
   String _statusMessage = 'Position your face in the circle';
@@ -46,23 +50,26 @@ class _EnrolmentScreenState extends State<EnrolmentScreen> {
   }
 
   Future<void> _initCamera() async {
-    // Request camera permission (NF-06)
     final status = await Permission.camera.request();
     if (!status.isGranted) {
       if (mounted) {
         setState(() {
-          _statusMessage = 'Camera permission required. Please enable in Settings.';
+          _statusMessage =
+              'Camera permission required. Please enable in Settings.';
         });
       }
       return;
     }
-    final frontCamera = widget.cameras.firstWhere(
+
+    await Future.delayed(const Duration(milliseconds: 1000));
+
+    _frontCamera = widget.cameras.firstWhere(
       (c) => c.lensDirection == CameraLensDirection.front,
       orElse: () => widget.cameras.first,
     );
 
     _cameraController = CameraController(
-      frontCamera,
+      _frontCamera!,
       ResolutionPreset.medium,
       enableAudio: false,
       imageFormatGroup: ImageFormatGroup.yuv420,
@@ -82,6 +89,65 @@ class _EnrolmentScreenState extends State<EnrolmentScreen> {
     _cameraController!.startImageStream(_processFrame);
   }
 
+  InputImageRotation _getRotation() {
+    final orientation = _frontCamera?.sensorOrientation ?? 270;
+    switch (orientation) {
+      case 90:
+        return InputImageRotation.rotation90deg;
+      case 180:
+        return InputImageRotation.rotation180deg;
+      case 270:
+        return InputImageRotation.rotation270deg;
+      default:
+        return InputImageRotation.rotation0deg;
+    }
+  }
+
+  // Quality score between 0.0 and 1.0
+  // Based on face size, yaw, pitch and roll
+  double _calculateQuality(Face face) {
+    double score = 1.0;
+
+    // Face must be large enough — too small means too far away
+    final faceSize = face.boundingBox.width;
+    if (faceSize < 100) return 0.0;
+    if (faceSize < 150) score *= 0.7;
+
+    // Yaw — left/right head turn
+    final yaw = face.headEulerAngleY?.abs() ?? 0;
+    if (yaw > 20) return 0.0;
+    if (yaw > 10) score *= 0.8;
+
+    // Pitch — up/down head tilt
+    final pitch = face.headEulerAngleX?.abs() ?? 0;
+    if (pitch > 20) return 0.0;
+    if (pitch > 10) score *= 0.8;
+
+    // Roll — head rotation
+    final roll = face.headEulerAngleZ?.abs() ?? 0;
+    if (roll > 20) return 0.0;
+    if (roll > 10) score *= 0.9;
+
+    return score;
+  }
+
+  // User-friendly quality feedback message
+  String _getQualityMessage(Face face) {
+    final faceSize = face.boundingBox.width;
+    if (faceSize < 100) return 'Move closer to the camera';
+
+    final yaw = face.headEulerAngleY?.abs() ?? 0;
+    if (yaw > 20) return 'Face the camera directly';
+
+    final pitch = face.headEulerAngleX?.abs() ?? 0;
+    if (pitch > 20) return 'Hold your head straight';
+
+    final roll = face.headEulerAngleZ?.abs() ?? 0;
+    if (roll > 20) return 'Keep your head upright';
+
+    return 'Hold still — capturing...';
+  }
+
   Future<void> _processFrame(CameraImage frame) async {
     if (_enrolmentComplete) return;
     if (_isProcessingEnrolmentFrame) return;
@@ -98,20 +164,38 @@ class _EnrolmentScreenState extends State<EnrolmentScreen> {
       if (inputImage == null) return;
 
       final faces = await _faceDetector.processImage(inputImage);
-      final faceDetected = faces.isNotEmpty;
+
+      if (faces.isEmpty) {
+        if (mounted) {
+          setState(() {
+            _isFaceDetected = false;
+            if (!_isCapturing) {
+              _statusMessage = _capturedEmbeddings.isEmpty
+                  ? 'Position your face in the circle'
+                  : '${_capturedEmbeddings.length}/$_requiredSamples captured — keep going';
+            }
+          });
+        }
+        return;
+      }
+
+      // Pick largest detected face
+      final face = faces.reduce((a, b) =>
+          a.boundingBox.width > b.boundingBox.width ? a : b);
+
+      final quality = _calculateQuality(face);
 
       if (mounted) {
         setState(() {
-          _isFaceDetected = faceDetected;
-          if (!faceDetected && !_isCapturing) {
-            _statusMessage = _capturedEmbeddings.isEmpty
-                ? 'Position your face in the circle'
-                : '${_capturedEmbeddings.length}/$_requiredSamples captured — keep going';
+          _isFaceDetected = quality >= _minimumQuality;
+          if (!_isCapturing && quality < _minimumQuality) {
+            _statusMessage = _getQualityMessage(face);
           }
         });
       }
 
-      if (faceDetected && !_isCapturing && !_enrolmentComplete) {
+      // Only capture if quality threshold met (FR-04)
+      if (quality >= _minimumQuality && !_isCapturing && !_enrolmentComplete) {
         final now = DateTime.now();
         final timeSinceLast = _lastCaptureTime == null
             ? 9999
@@ -135,12 +219,10 @@ class _EnrolmentScreenState extends State<EnrolmentScreen> {
     try {
       FaceEmbedding? embedding;
 
-      // Try to extract real embedding from current YUV frame
       if (_interpreter != null && _lastFrame != null) {
         embedding = await _extractEmbeddingFromFrame(_lastFrame!);
       }
 
-      // Fall back to dummy if extraction failed
       embedding ??= FaceEmbedding(
         List.generate(128, (i) => (i * 0.001) - 0.256),
       );
@@ -165,7 +247,6 @@ class _EnrolmentScreenState extends State<EnrolmentScreen> {
     }
   }
 
-  // Extract real face embedding using TFLite model
   Future<FaceEmbedding?> _extractEmbeddingFromFrame(CameraImage frame) async {
     try {
       if (frame.planes.length < 3) return null;
@@ -255,6 +336,7 @@ class _EnrolmentScreenState extends State<EnrolmentScreen> {
     try {
       final int width = frame.width;
       final int height = frame.height;
+      final rotation = _getRotation();
 
       if (frame.planes.length == 1) {
         final format = InputImageFormatValue.fromRawValue(frame.format.raw);
@@ -263,7 +345,7 @@ class _EnrolmentScreenState extends State<EnrolmentScreen> {
           bytes: frame.planes[0].bytes,
           metadata: InputImageMetadata(
             size: Size(width.toDouble(), height.toDouble()),
-            rotation: InputImageRotation.rotation270deg,
+            rotation: rotation,
             format: format,
             bytesPerRow: frame.planes[0].bytesPerRow,
           ),
@@ -293,7 +375,7 @@ class _EnrolmentScreenState extends State<EnrolmentScreen> {
         bytes: nv21,
         metadata: InputImageMetadata(
           size: Size(width.toDouble(), height.toDouble()),
-          rotation: InputImageRotation.rotation270deg,
+          rotation: rotation,
           format: InputImageFormat.nv21,
           bytesPerRow: width,
         ),
@@ -348,9 +430,17 @@ class _EnrolmentScreenState extends State<EnrolmentScreen> {
                             child: SizedBox(
                               width: 280,
                               height: 280,
-                              child: CameraPreview(_cameraController!),
+                              child: FittedBox(
+                                fit: BoxFit.cover,
+                                child: SizedBox(
+                                  width: 280,
+                                  height: 280 * _cameraController!.value.aspectRatio,
+                                  child: CameraPreview(_cameraController!),
+                                ),
+                              ),
                             ),
                           ),
+                          // Detection ring — green when quality acceptable
                           Container(
                             width: 288,
                             height: 288,
@@ -402,7 +492,7 @@ class _EnrolmentScreenState extends State<EnrolmentScreen> {
                         ? 'Taking you to the game...'
                         : _isFaceDetected
                             ? 'Hold still — capturing automatically'
-                            : 'Look directly at the camera',
+                            : _statusMessage,
                     style: const TextStyle(
                       color: Colors.white54,
                       fontSize: 14,
