@@ -151,7 +151,7 @@ class _EnrolmentScreenState extends State<EnrolmentScreen> {
       });
     }
 
-    await Future.delayed(const Duration(milliseconds: 800));
+    await Future.delayed(const Duration(milliseconds: 1500));
     if (mounted) Navigator.of(context).pushReplacementNamed('/game');
   }
 
