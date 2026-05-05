@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
@@ -9,9 +10,6 @@ import '../recognition/face_embedding.dart';
 import 'package:tflite_flutter/tflite_flutter.dart';
 import 'package:image/image.dart' as img;
 import 'package:flutter/foundation.dart';
-// The recognition engine — runs on a background Isolate
-// This is the core of the CFR system (FR-08, FR-09, FR-10)
-// It processes camera frames independently of the UI/game thread
 
 class RecognitionEngine {
   final RecognitionBridge _bridge;
@@ -21,14 +19,8 @@ class RecognitionEngine {
   FaceDetector? _faceDetector;
   FaceEmbedding? _enrolledEmbedding;
 
-  // Debounce tracking (FR-28)
-  // A single missed frame won't trigger NOT RECOGNISED
   int _missedFrameCount = 0;
-  static const int _debounceThreshold = 3; // ~600ms at 5fps
-
-  // Confidence threshold (FR-11)
-  // 0.75 chosen based on MobileFaceNet benchmarks
-  // Above = RECOGNISED, below = NOT RECOGNISED
+  static const int _debounceThreshold = 3;
   static const double _confidenceThreshold = 0.75;
 
   bool _isRunning = false;
@@ -41,14 +33,12 @@ class RecognitionEngine {
   })  : _bridge = bridge,
         _enrolmentService = enrolmentService;
 
-  // Initialise the TFLite model and face detector
   Future<void> initialise() async {
     try {
       _interpreter = await Interpreter.fromAsset(
         'assets/models/mobilefacenet.tflite',
       );
     } catch (e) {
-      // Model failed to load — engine will run in detection-only mode
       _interpreter = null;
     }
 
@@ -71,15 +61,14 @@ class RecognitionEngine {
     }
   }
 
-  // Start processing camera frames
   void startProcessing(CameraController cameraController) {
-    if (_isRunning) return;
+    if (_isRunning) {
+      return;
+    }
     _isRunning = true;
 
     cameraController.startImageStream((CameraImage frame) async {
       if (!_isRunning) return;
-      // Skip frame if still processing previous one (FR-09)
-      // This prevents frame pile-up and ensures consistent 5fps evaluation
       if (_isProcessingFrame) return;
       _isProcessingFrame = true;
       try {
@@ -97,7 +86,6 @@ class RecognitionEngine {
     } catch (_) {}
   }
 
-  // Core processing loop — called for each camera frame
   Future<void> _processFrame(CameraImage frame) async {
     try {
       if (_enrolledEmbedding == null) {
@@ -126,12 +114,19 @@ class RecognitionEngine {
       final face = faces.reduce((a, b) =>
           a.boundingBox.width > b.boundingBox.width ? a : b);
 
+
       if (!_isFaceQualityAcceptable(face)) {
         _handleNoFace();
         return;
       }
 
-      // If no interpreter, use face presence as recognition signal
+      if (frame.planes.length == 1) {
+        _missedFrameCount = 0;
+        _notRecognisedSince = null;
+        _updateState(RecognitionStatus.recognised, 1.0);
+        return;
+      }
+
       if (_interpreter == null) {
         _missedFrameCount = 0;
         _notRecognisedSince = null;
@@ -139,13 +134,13 @@ class RecognitionEngine {
         return;
       }
 
-      // Extract embedding from face region
       final embedding = await _extractEmbedding(frame, face);
       if (embedding == null) {
         return;
       }
 
       final similarity = embedding.cosineSimilarity(_enrolledEmbedding!);
+
       if (similarity >= _confidenceThreshold) {
         _missedFrameCount = 0;
         _notRecognisedSince = null;
@@ -158,8 +153,6 @@ class RecognitionEngine {
     }
   }
 
-  // Debounce logic (FR-28)
-  // Only trigger NOT RECOGNISED after _debounceThreshold consecutive misses
   void _handleNoFace() {
     _missedFrameCount++;
     if (_missedFrameCount >= _debounceThreshold) {
@@ -168,13 +161,11 @@ class RecognitionEngine {
     }
   }
 
-  // Check if session has been NOT RECOGNISED for 60+ seconds (FR-29)
   bool get shouldTerminateSession {
     if (_notRecognisedSince == null) return false;
     return DateTime.now().difference(_notRecognisedSince!).inSeconds >= 60;
   }
 
-  // Update the shared bridge state — readable by game loop
   void _updateState(RecognitionStatus status, double confidence) {
     _bridge.updateState(RecognitionState(
       status: status,
@@ -183,30 +174,24 @@ class RecognitionEngine {
     ));
   }
 
-  // Check face quality — reject partial or low quality faces (FR-04)
   bool _isFaceQualityAcceptable(Face face) {
-    // Face must be large enough in frame
     if (face.boundingBox.width < 80 || face.boundingBox.height < 80) {
       return false;
     }
-    // Head rotation must be within acceptable range
     if (face.headEulerAngleY != null && face.headEulerAngleY!.abs() > 30) {
       return false;
     }
     return true;
   }
 
-  // Convert CameraImage to InputImage for ML Kit
   InputImage? _convertToInputImage(CameraImage frame) {
     try {
       final int width = frame.width;
       final int height = frame.height;
 
       if (frame.planes.length == 1) {
-        // Single plane — detect actual format
         final format = InputImageFormatValue.fromRawValue(frame.format.raw);
         if (format == null) return null;
-        
         return InputImage.fromBytes(
           bytes: frame.planes[0].bytes,
           metadata: InputImageMetadata(
@@ -218,7 +203,6 @@ class RecognitionEngine {
         );
       }
 
-      // Multi-plane YUV — convert to NV21
       final yPlane = frame.planes[0];
       final uPlane = frame.planes[1];
       final vPlane = frame.planes[2];
@@ -253,43 +237,27 @@ class RecognitionEngine {
     }
   }
 
-  // Extract face embedding using MobileFaceNet TFLite model
   Future<FaceEmbedding?> _extractEmbedding(
       CameraImage frame, Face face) async {
     if (_interpreter == null) return null;
-    
-    // Can't extract embedding from single-plane JPEG frames
-    // Fall back to face presence recognition
-    if (frame.planes.length == 1) {
-      _missedFrameCount = 0;
-      _notRecognisedSince = null;
-      _updateState(RecognitionStatus.recognised, 1.0);
-      return null;
-    }
+    if (frame.planes.length == 1) return null;
 
     try {
       final faceImage = _cropAndResizeFace(frame, face);
       if (faceImage == null) return null;
 
-      // Prepare input tensor — normalise to [-1, 1]
       final input = _preprocessImage(faceImage);
-
-      // Output tensor — 512 dimensional embedding
-      final output = List.filled(512, 0.0).reshape([1, 512]);
-
-      // Run inference on-device (NF-02)
+      final output = List.filled(128, 0.0).reshape([1, 128]);
       _interpreter!.run(input, output);
 
       return FaceEmbedding(List<double>.from(output[0]));
     } catch (e) {
-      return null;
+        return null;
     }
   }
 
-  // Crop face region from camera frame and resize to 112x112
   img.Image? _cropAndResizeFace(CameraImage frame, Face face) {
     try {
-      // Convert YUV420 to RGB
       final image = _yuv420ToRgb(frame);
       if (image == null) return null;
 
@@ -306,7 +274,6 @@ class RecognitionEngine {
     }
   }
 
-  // Convert YUV420 camera format to RGB image
   img.Image? _yuv420ToRgb(CameraImage frame) {
     try {
       final int width = frame.width;
@@ -327,9 +294,7 @@ class RecognitionEngine {
           final int vVal = vPlane[uvIndex] - 128;
 
           int r = (yVal + 1.402 * vVal).round().clamp(0, 255);
-          int g = (yVal - 0.344136 * uVal - 0.714136 * vVal)
-              .round()
-              .clamp(0, 255);
+          int g = (yVal - 0.344136 * uVal - 0.714136 * vVal).round().clamp(0, 255);
           int b = (yVal + 1.772 * uVal).round().clamp(0, 255);
 
           image.setPixelRgb(x, y, r, g, b);
@@ -341,7 +306,6 @@ class RecognitionEngine {
     }
   }
 
-  // Normalise pixel values to [-1, 1] for MobileFaceNet
   List<List<List<List<double>>>> _preprocessImage(img.Image image) {
     final input = List.generate(
       1,

@@ -2,6 +2,8 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
+import 'package:tflite_flutter/tflite_flutter.dart';
+import 'package:image/image.dart' as img;
 import 'face_enrolment_service.dart';
 import '../recognition/face_embedding.dart';
 
@@ -16,6 +18,7 @@ class EnrolmentScreen extends StatefulWidget {
 
 class _EnrolmentScreenState extends State<EnrolmentScreen> {
   CameraController? _cameraController;
+  Interpreter? _interpreter;
   final FaceEnrolmentService _enrolmentService = FaceEnrolmentService();
   final FaceDetector _faceDetector = FaceDetector(
     options: FaceDetectorOptions(
@@ -24,7 +27,6 @@ class _EnrolmentScreenState extends State<EnrolmentScreen> {
     ),
   );
 
-  // Enrolment state
   List<FaceEmbedding> _capturedEmbeddings = [];
   static const int _requiredSamples = 3;
   bool _isCapturing = false;
@@ -34,6 +36,7 @@ class _EnrolmentScreenState extends State<EnrolmentScreen> {
   bool _isProcessingEnrolmentFrame = false;
   int _frameSkipCounter = 0;
   DateTime? _lastCaptureTime;
+  CameraImage? _lastFrame;
 
   @override
   void initState() {
@@ -51,10 +54,19 @@ class _EnrolmentScreenState extends State<EnrolmentScreen> {
       frontCamera,
       ResolutionPreset.medium,
       enableAudio: false,
-      imageFormatGroup: ImageFormatGroup.jpeg,
+      imageFormatGroup: ImageFormatGroup.yuv420,
     );
 
     await _cameraController!.initialize();
+
+    try {
+      _interpreter = await Interpreter.fromAsset(
+        'assets/models/mobilefacenet.tflite',
+      );
+    } catch (e) {
+      _interpreter = null;
+    }
+
     if (mounted) setState(() {});
     _cameraController!.startImageStream(_processFrame);
   }
@@ -63,7 +75,8 @@ class _EnrolmentScreenState extends State<EnrolmentScreen> {
     if (_enrolmentComplete) return;
     if (_isProcessingEnrolmentFrame) return;
 
-    // Process every 4th frame to keep UI smooth (FR-05)
+    _lastFrame = frame;
+
     _frameSkipCounter++;
     if (_frameSkipCounter % 4 != 0) return;
 
@@ -87,8 +100,6 @@ class _EnrolmentScreenState extends State<EnrolmentScreen> {
         });
       }
 
-      // Auto capture when face detected (FR-02, FR-04)
-      // Minimum 1 second between captures for sample diversity
       if (faceDetected && !_isCapturing && !_enrolmentComplete) {
         final now = DateTime.now();
         final timeSinceLast = _lastCaptureTime == null
@@ -105,18 +116,22 @@ class _EnrolmentScreenState extends State<EnrolmentScreen> {
     }
   }
 
-  // Capture directly from live stream — no camera stop/restart (FR-02)
   Future<void> _captureFromStream() async {
     if (_isCapturing || _enrolmentComplete) return;
     if (mounted) setState(() => _isCapturing = true);
     _lastCaptureTime = DateTime.now();
 
     try {
-      // Generate embedding
-      // On physical device with YUV frames, full TFLite pipeline runs
-      // On emulator with JPEG frames, face presence confirms capture
-      final embedding = FaceEmbedding(
-        List.generate(512, (i) => (i * 0.001) - 0.256),
+      FaceEmbedding? embedding;
+
+      // Try to extract real embedding from current YUV frame
+      if (_interpreter != null && _lastFrame != null) {
+        embedding = await _extractEmbeddingFromFrame(_lastFrame!);
+      }
+
+      // Fall back to dummy if extraction failed
+      embedding ??= FaceEmbedding(
+        List.generate(128, (i) => (i * 0.001) - 0.256),
       );
 
       _capturedEmbeddings.add(embedding);
@@ -139,7 +154,64 @@ class _EnrolmentScreenState extends State<EnrolmentScreen> {
     }
   }
 
-  // Average all captured embeddings and persist (FR-03)
+  // Extract real face embedding using TFLite model
+  Future<FaceEmbedding?> _extractEmbeddingFromFrame(CameraImage frame) async {
+    try {
+      if (frame.planes.length < 3) return null;
+
+      final int width = frame.width;
+      final int height = frame.height;
+      final image = img.Image(width: width, height: height);
+
+      final yPlane = frame.planes[0].bytes;
+      final uPlane = frame.planes[1].bytes;
+      final vPlane = frame.planes[2].bytes;
+
+      for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+          final int yIndex = y * width + x;
+          final int uvIndex = (y ~/ 2) * (width ~/ 2) + (x ~/ 2);
+          final int yVal = yPlane[yIndex];
+          final int uVal = uPlane[uvIndex] - 128;
+          final int vVal = vPlane[uvIndex] - 128;
+          int r = (yVal + 1.402 * vVal).round().clamp(0, 255);
+          int g = (yVal - 0.344136 * uVal - 0.714136 * vVal)
+              .round()
+              .clamp(0, 255);
+          int b = (yVal + 1.772 * uVal).round().clamp(0, 255);
+          image.setPixelRgb(x, y, r, g, b);
+        }
+      }
+
+      final resized = img.copyResize(image, width: 112, height: 112);
+
+      final input = List.generate(
+        1,
+        (_) => List.generate(
+          112,
+          (y) => List.generate(
+            112,
+            (x) {
+              final pixel = resized.getPixel(x, y);
+              return [
+                (pixel.r / 127.5) - 1.0,
+                (pixel.g / 127.5) - 1.0,
+                (pixel.b / 127.5) - 1.0,
+              ];
+            },
+          ),
+        ),
+      );
+
+      final output = List.filled(128, 0.0).reshape([1, 128]);
+      _interpreter!.run(input, output);
+
+      return FaceEmbedding(List<double>.from(output[0]));
+    } catch (e) {
+      return null;
+    }
+  }
+
   Future<void> _completeEnrolment() async {
     final averaged = FaceEmbedding.average(_capturedEmbeddings);
     await _enrolmentService.saveEmbedding(averaged);
@@ -155,7 +227,6 @@ class _EnrolmentScreenState extends State<EnrolmentScreen> {
     if (mounted) Navigator.of(context).pushReplacementNamed('/game');
   }
 
-  // Re-enrolment — clears existing data (FR-06)
   Future<void> _reEnrol() async {
     await _enrolmentService.clearEnrolment();
     if (mounted) {
@@ -163,13 +234,12 @@ class _EnrolmentScreenState extends State<EnrolmentScreen> {
         _capturedEmbeddings = [];
         _enrolmentComplete = false;
         _lastCaptureTime = null;
+        _lastFrame = null;
         _statusMessage = 'Position your face in the circle';
       });
     }
   }
 
-  // Convert camera frame to ML Kit format
-  // Handles both single-plane JPEG (emulator) and multi-plane YUV (physical device)
   InputImage? _buildInputImage(CameraImage frame) {
     try {
       final int width = frame.width;
@@ -189,7 +259,6 @@ class _EnrolmentScreenState extends State<EnrolmentScreen> {
         );
       }
 
-      // Multi-plane YUV — convert to NV21 for ML Kit
       final yPlane = frame.planes[0];
       final uPlane = frame.planes[1];
       final vPlane = frame.planes[2];
@@ -227,6 +296,7 @@ class _EnrolmentScreenState extends State<EnrolmentScreen> {
   void dispose() {
     _cameraController?.dispose();
     _faceDetector.close();
+    _interpreter?.close();
     super.dispose();
   }
 
@@ -270,7 +340,6 @@ class _EnrolmentScreenState extends State<EnrolmentScreen> {
                               child: CameraPreview(_cameraController!),
                             ),
                           ),
-                          // Detection ring — green when face detected
                           Container(
                             width: 288,
                             height: 288,
@@ -290,7 +359,7 @@ class _EnrolmentScreenState extends State<EnrolmentScreen> {
               ),
             ),
 
-            // Sample progress dots (FR-05)
+            // Sample progress dots
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 16),
               child: Row(

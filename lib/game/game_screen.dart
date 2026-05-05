@@ -74,13 +74,13 @@ class _GameScreenState extends State<GameScreen>
         frontCamera,
         ResolutionPreset.low,
         enableAudio: false,
-        imageFormatGroup: ImageFormatGroup.nv21,
+        imageFormatGroup: ImageFormatGroup.yuv420,
       );
 
       await _cameraController!.initialize();
       _recognitionEngine.startProcessing(_cameraController!);
     } catch (e) {
-      // Camera stop ignpred on dispose 
+      // Camera stop ignpred on dispose       
     }
   }
 
