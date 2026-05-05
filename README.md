@@ -145,7 +145,7 @@ In production, the threshold should be calibrated per-device using a held-out va
 static const int _debounceThreshold = 3; // ~450ms at 5fps on physical device
 ```
 
-A single missed frame does not trigger NOT RECOGNISED. Only after 3 consecutive missed frames does the state transition to NOT RECOGNISED and the game pause.
+A single missed frame does not trigger NOT RECOGNISED. Only after 3 consecutive missed frames does the state transition to NOT RECOGNISED and the game pause. If the application remains in NOT RECOGNISED state for 60s the session can reset to enrolment.
 
 **Rationale:** A single missed frame is common due to motion blur, lighting changes, or brief occlusion. Requiring 3 consecutive misses eliminates false pauses while still meeting the 500ms transition requirement (FR-27).
 
@@ -170,6 +170,8 @@ double _calculateQuality(Face face) {
 ```
 
 Only frames scoring above 0.6 are captured. This mirrors the production approach used in commercial biometric systems — quality-gated selection rather than arbitrary consecutive frame counts. Enrolment quality directly determines recognition accuracy throughout the session — for a security SDK, a poor enrolment embedding means either false rejections (enrolled user locked out) or false accepts (impostor passes).
+
+Real-time visual feedback is provided to guide the user during enrolment, as demonstrated in the accompanying video.
 
 ### Full embedding pipeline
 
@@ -206,6 +208,8 @@ if (quality >= _minimumQuality && timeSinceLast >= 1000) {
   await _captureFromStream(frame, face);
 }
 ```
+
+Frames where no face is detected are treated as NOT RECOGNISED without interrupting the processing pipeline.
 
 ### Camera format and rotation handling
 
