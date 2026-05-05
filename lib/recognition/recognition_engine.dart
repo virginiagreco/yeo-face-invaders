@@ -26,7 +26,6 @@ class RecognitionEngine {
   bool _isRunning = false;
   bool _isProcessingFrame = false;
   DateTime? _notRecognisedSince;
-  DateTime? _faceLastSeen;
 
   RecognitionEngine({
     required RecognitionBridge bridge,
@@ -123,7 +122,6 @@ class RecognitionEngine {
       }
 
       // Face is present — reset missed frame tracking
-      _faceLastSeen ??= DateTime.now();
       _missedFrameCount = 0;
 
       final face = faces.reduce((a, b) =>
@@ -135,18 +133,12 @@ class RecognitionEngine {
       }
 
       if (frame.planes.length == 1) {
-        _faceLastSeen = DateTime.now();
-        _missedFrameCount = 0;
-        _notRecognisedSince = null;
-        _updateState(RecognitionStatus.recognised, 1.0);
+        _handleNoFace();
         return;
       }
 
       if (_interpreter == null) {
-        _faceLastSeen = DateTime.now();
-        _missedFrameCount = 0;
-        _notRecognisedSince = null;
-        _updateState(RecognitionStatus.recognised, 1.0);
+        _handleNoFace();
         return;
       }
 
@@ -156,7 +148,6 @@ class RecognitionEngine {
       final similarity = embedding.cosineSimilarity(_enrolledEmbedding!);
 
       if (similarity >= _confidenceThreshold) {
-        _faceLastSeen = DateTime.now();
         _missedFrameCount = 0;
         _notRecognisedSince = null;
         _updateState(RecognitionStatus.recognised, similarity);
@@ -168,13 +159,9 @@ class RecognitionEngine {
     }
   }
 
-  // Remove _faceLastSeen ??= DateTime.now() from _handleNoFace
   void _handleNoFace() {
     _missedFrameCount++;
     if (_missedFrameCount >= _debounceThreshold) {
-      if (_faceLastSeen != null) {
-        _faceLastSeen = null;
-      }
       _notRecognisedSince ??= DateTime.now();
       _updateState(RecognitionStatus.notRecognised, 0.0);
     }
@@ -303,11 +290,13 @@ class RecognitionEngine {
       final yPlane = frame.planes[0].bytes;
       final uPlane = frame.planes[1].bytes;
       final vPlane = frame.planes[2].bytes;
+      final yStride = frame.planes[0].bytesPerRow;
+      final uvStride = frame.planes[1].bytesPerRow;
 
       for (int y = 0; y < height; y++) {
         for (int x = 0; x < width; x++) {
-          final int yIndex = y * width + x;
-          final int uvIndex = (y ~/ 2) * (width ~/ 2) + (x ~/ 2);
+          final int yIndex = y * yStride + x;
+          final int uvIndex = (y ~/ 2) * uvStride + (x ~/ 2);
 
           final int yVal = yPlane[yIndex];
           final int uVal = uPlane[uvIndex] - 128;

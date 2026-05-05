@@ -27,9 +27,9 @@ cd yeo-face-invaders
 flutter pub get
 ```
 
-3. **Add the FaceNet model**
+3. **Add the TFLite model**
 
-The TFLite model is not included in the repository due to file size. Download it and place it at `assets/models/mobilefacenet.tflite`:
+The TFLite model is not included in the repository due to file size. Download it and place it at `assets/models/mobilefacenet.tflite` (the filename is a legacy artifact from an earlier design iteration — the file itself is the FaceNet model):
 
 ```bash
 curl -L "https://github.com/shubham0204/FaceRecognition_With_FaceNet_Android/raw/master/app/src/main/assets/facenet.tflite" -o assets/models/mobilefacenet.tflite
@@ -63,7 +63,7 @@ lib/
 Front Camera (YUV_420_888)
      ↓
 [ML Kit Face Detector]  — detects face bounding box and pose angles
-     ↓ quality gate (size, yaw, pitch, roll)
+     ↓ quality gate (size, yaw)
 [FaceNet TFLite Model]  — extracts 128-dimensional embedding vector
      ↓ cosine similarity vs enrolled embedding
 [Recognition Engine]    — publishes RECOGNISED / NOT RECOGNISED state
@@ -75,7 +75,7 @@ Front Camera (YUV_420_888)
 [Space Invaders]        — game loop reads recognition state every tick
 ```
 
-The recognition engine processes camera frames via `startImageStream`, which delivers YUV_420_888 frames on a background platform thread. Each frame is converted to NV21 format for ML Kit face detection. When a face passes the quality gate, the face region is cropped, resized to 112×112, and fed to the FaceNet TFLite model to produce a 128-dimensional embedding. This embedding is compared to the stored enrolled embedding via cosine similarity. A `_isProcessingFrame` boolean flag prevents frame pile-up, ensuring the UI thread is never blocked (FR-08).
+The recognition engine processes camera frames via `startImageStream`, which delivers YUV_420_888 frames on a background platform thread. Each frame is converted to NV21 format for ML Kit face detection. When a face passes the quality gate (bounding box ≥ 80 px, |yaw| ≤ 30°), the face region is cropped using the ML Kit bounding box, resized to 112×112, and fed to the FaceNet TFLite model to produce a 128-dimensional embedding. This embedding is compared to the stored enrolled embedding via cosine similarity. A `_isProcessingFrame` boolean flag prevents frame pile-up, ensuring the UI thread is never blocked (FR-08).
 
 The `RecognitionBridge` exposes a `StreamController.broadcast()` that both the recognition engine and game screen subscribe to. This is the thread-safe observable required by FR-12.
 
@@ -107,7 +107,11 @@ FaceNet TFLite inference → 128-dimensional embedding
 ```
 
 **Why FaceNet over MobileFaceNet:**  
-MobileFaceNet (1.9MB) was the initial target but the available TFLite port produced incorrect output shapes causing inference failures on both emulator and physical device. FaceNet at 23MB remains well within the 50MB limit, outputs a correct 128-dimensional embedding, and delivers strong accuracy on the LFW benchmark (99.63%). The size trade-off is justified for a security-critical application where recognition accuracy directly affects session integrity.
+FaceNet offers consistently strong recognition accuracy and produces stable 128-dimensional embeddings that work well with cosine similarity. Compared to MobileFaceNet, it is generally more robust to variations in lighting and pose, which is important for maintaining reliable recognition during gameplay.
+
+MobileFaceNet is significantly smaller and faster, making it more suitable for production environments where performance and battery usage are critical. However, FaceNet provides a more straightforward and reliable baseline, especially during development.
+
+Despite its larger size (23MB), FaceNet performs adequately even on older hardware such as the Vodafone Smart N9 (VFD 620), where inference remains stable and within acceptable latency for this application.
 
 **Known trade-offs:**
 - Larger model size increases first-load time (~200ms on physical device)
@@ -178,7 +182,11 @@ Quality score calculated (size, yaw, pitch, roll)
      ↓
 Quality ≥ 0.6? No → reject frame, show guidance message
      ↓
-YUV frame → RGB conversion → resize to 112×112
+YUV frame → RGB conversion
+     ↓
+Crop face region using ML Kit bounding box
+     ↓
+Resize to 112×112 pixels
      ↓
 FaceNet TFLite inference → 128-dimensional embedding
      ↓
@@ -195,7 +203,7 @@ The enrolment flow captures samples automatically — no manual button press req
 
 ```dart
 if (quality >= _minimumQuality && timeSinceLast >= 1000) {
-  await _captureFromStream();
+  await _captureFromStream(frame, face);
 }
 ```
 

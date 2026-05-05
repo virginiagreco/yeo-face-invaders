@@ -41,7 +41,6 @@ class _EnrolmentScreenState extends State<EnrolmentScreen> {
   bool _isProcessingEnrolmentFrame = false;
   int _frameSkipCounter = 0;
   DateTime? _lastCaptureTime;
-  CameraImage? _lastFrame;
 
   @override
   void initState() {
@@ -152,8 +151,6 @@ class _EnrolmentScreenState extends State<EnrolmentScreen> {
     if (_enrolmentComplete) return;
     if (_isProcessingEnrolmentFrame) return;
 
-    _lastFrame = frame;
-
     _frameSkipCounter++;
     if (_frameSkipCounter % 4 != 0) return;
 
@@ -202,7 +199,7 @@ class _EnrolmentScreenState extends State<EnrolmentScreen> {
             : now.difference(_lastCaptureTime!).inMilliseconds;
 
         if (timeSinceLast >= 1000) {
-          await _captureFromStream();
+          await _captureFromStream(frame, face);
         }
       }
     } catch (_) {
@@ -211,21 +208,16 @@ class _EnrolmentScreenState extends State<EnrolmentScreen> {
     }
   }
 
-  Future<void> _captureFromStream() async {
+  Future<void> _captureFromStream(CameraImage frame, Face face) async {
     if (_isCapturing || _enrolmentComplete) return;
     if (mounted) setState(() => _isCapturing = true);
     _lastCaptureTime = DateTime.now();
 
     try {
-      FaceEmbedding? embedding;
+      if (_interpreter == null) return;
 
-      if (_interpreter != null && _lastFrame != null) {
-        embedding = await _extractEmbeddingFromFrame(_lastFrame!);
-      }
-
-      embedding ??= FaceEmbedding(
-        List.generate(128, (i) => (i * 0.001) - 0.256),
-      );
+      final embedding = await _extractEmbeddingFromFrame(frame, face);
+      if (embedding == null) return;
 
       _capturedEmbeddings.add(embedding);
 
@@ -247,7 +239,8 @@ class _EnrolmentScreenState extends State<EnrolmentScreen> {
     }
   }
 
-  Future<FaceEmbedding?> _extractEmbeddingFromFrame(CameraImage frame) async {
+  Future<FaceEmbedding?> _extractEmbeddingFromFrame(
+      CameraImage frame, Face face) async {
     try {
       if (frame.planes.length < 3) return null;
 
@@ -258,11 +251,13 @@ class _EnrolmentScreenState extends State<EnrolmentScreen> {
       final yPlane = frame.planes[0].bytes;
       final uPlane = frame.planes[1].bytes;
       final vPlane = frame.planes[2].bytes;
+      final yStride = frame.planes[0].bytesPerRow;
+      final uvStride = frame.planes[1].bytesPerRow;
 
       for (int y = 0; y < height; y++) {
         for (int x = 0; x < width; x++) {
-          final int yIndex = y * width + x;
-          final int uvIndex = (y ~/ 2) * (width ~/ 2) + (x ~/ 2);
+          final int yIndex = y * yStride + x;
+          final int uvIndex = (y ~/ 2) * uvStride + (x ~/ 2);
           final int yVal = yPlane[yIndex];
           final int uVal = uPlane[uvIndex] - 128;
           final int vVal = vPlane[uvIndex] - 128;
@@ -275,16 +270,23 @@ class _EnrolmentScreenState extends State<EnrolmentScreen> {
         }
       }
 
-      final resized = img.copyResize(image, width: 112, height: 112);
+      final box = face.boundingBox;
+      final cx = box.left.toInt().clamp(0, image.width - 1);
+      final cy = box.top.toInt().clamp(0, image.height - 1);
+      final cw = box.width.toInt().clamp(1, image.width - cx);
+      final ch = box.height.toInt().clamp(1, image.height - cy);
+
+      final cropped = img.copyCrop(image, x: cx, y: cy, width: cw, height: ch);
+      final resized = img.copyResize(cropped, width: 112, height: 112);
 
       final input = List.generate(
         1,
         (_) => List.generate(
           112,
-          (y) => List.generate(
+          (py) => List.generate(
             112,
-            (x) {
-              final pixel = resized.getPixel(x, y);
+            (px) {
+              final pixel = resized.getPixel(px, py);
               return [
                 (pixel.r / 127.5) - 1.0,
                 (pixel.g / 127.5) - 1.0,
@@ -326,7 +328,6 @@ class _EnrolmentScreenState extends State<EnrolmentScreen> {
         _capturedEmbeddings = [];
         _enrolmentComplete = false;
         _lastCaptureTime = null;
-        _lastFrame = null;
         _statusMessage = 'Position your face in the circle';
       });
     }
