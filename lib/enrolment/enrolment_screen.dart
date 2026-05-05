@@ -6,6 +6,7 @@ import 'package:tflite_flutter/tflite_flutter.dart';
 import 'package:image/image.dart' as img;
 import 'face_enrolment_service.dart';
 import '../recognition/face_embedding.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 class EnrolmentScreen extends StatefulWidget {
   final List<CameraDescription> cameras;
@@ -45,6 +46,16 @@ class _EnrolmentScreenState extends State<EnrolmentScreen> {
   }
 
   Future<void> _initCamera() async {
+    // Request camera permission (NF-06)
+    final status = await Permission.camera.request();
+    if (!status.isGranted) {
+      if (mounted) {
+        setState(() {
+          _statusMessage = 'Camera permission required. Please enable in Settings.';
+        });
+      }
+      return;
+    }
     final frontCamera = widget.cameras.firstWhere(
       (c) => c.lensDirection == CameraLensDirection.front,
       orElse: () => widget.cameras.first,

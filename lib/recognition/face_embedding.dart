@@ -1,6 +1,6 @@
 import 'dart:math';
 
-// Represents a face embedding — a list of 512 numbers that
+// Represents a face embedding — a list of 128 numbers that
 // uniquely describe a face (output of MobileFaceNet)
 // Think of it like a fingerprint, but as numbers
 

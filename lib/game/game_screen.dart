@@ -5,6 +5,7 @@ import '../integration/recognition_bridge.dart';
 import '../recognition/recognition_engine.dart';
 import '../enrolment/face_enrolment_service.dart';
 import 'space_invaders_game.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 class GameScreen extends StatefulWidget {
   final List<CameraDescription> cameras;
@@ -60,6 +61,9 @@ class _GameScreenState extends State<GameScreen>
 
     Future<void> _initRecognition() async {
     try {
+    // Request camera permission (NF-06)
+    final status = await Permission.camera.request();
+    if (!status.isGranted) return;
       // Wait for enrolment camera to fully release
       await Future.delayed(const Duration(milliseconds: 500));
       
@@ -80,7 +84,7 @@ class _GameScreenState extends State<GameScreen>
       await _cameraController!.initialize();
       _recognitionEngine.startProcessing(_cameraController!);
     } catch (e) {
-      // Camera stop ignpred on dispose       
+      // Camera stop errors ignored on dispose      
     }
   }
 

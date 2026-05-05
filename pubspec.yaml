@@ -24,6 +24,9 @@ dependencies:
   
   # Image processing
   image: ^4.1.7
+  
+  # Permission for camera
+  permission_handler: ^11.0.0
 
 dev_dependencies:
   flutter_test:

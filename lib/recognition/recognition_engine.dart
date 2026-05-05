@@ -9,7 +9,6 @@ import '../enrolment/face_enrolment_service.dart';
 import '../recognition/face_embedding.dart';
 import 'package:tflite_flutter/tflite_flutter.dart';
 import 'package:image/image.dart' as img;
-import 'package:flutter/foundation.dart';
 
 class RecognitionEngine {
   final RecognitionBridge _bridge;
