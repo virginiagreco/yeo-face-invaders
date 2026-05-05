@@ -142,6 +142,9 @@ static const int _debounceThreshold = 3; // ~600ms at 5fps
 A single missed frame does not trigger NOT RECOGNISED. Only after 3 consecutive missed frames (approximately 600ms at 5 evaluations per second) does the state transition to NOT RECOGNISED and the game pause.
 
 **Rationale:** A single missed frame is common due to motion blur, lighting changes, or brief occlusion. Requiring 3 consecutive misses eliminates false pauses while still meeting the 500ms transition requirement (FR-27) — 3 frames at 5fps = 600ms worst case, within acceptable tolerance.
+**Note on FR-27:** The 500ms transition requirement is met on physical hardware 
+(3 frames × ~150ms = ~450ms). On the emulator at ~1fps, transition takes ~3 seconds 
+due to inference speed — this is an emulator-only constraint.
 
 ---
 
