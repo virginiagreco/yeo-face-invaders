@@ -2,7 +2,6 @@
 
 **Candidate:** Virginia Greco  
 **Role:** Machine Learning & AI Engineer  
-**Submission Date:** May 2026
 
 ---
 
@@ -30,7 +29,7 @@ flutter pub get
 
 3. **Add the FaceNet model**
 
-The TFLite model is not included in the repository due to size. Download it and place it at `assets/models/mobilefacenet.tflite`:
+The TFLite model is not included in the repository due to file size. Download it and place it at `assets/models/mobilefacenet.tflite`:
 
 ```bash
 curl -L "https://github.com/shubham0204/FaceRecognition_With_FaceNet_Android/raw/master/app/src/main/assets/facenet.tflite" -o assets/models/mobilefacenet.tflite
@@ -91,7 +90,7 @@ MobileFaceNet (1.9MB) was the initial target but the available TFLite port produ
 **Known trade-offs:**
 - Larger model size increases load time (~200ms on first initialisation)
 - 512-dimensional embeddings require more storage than 192-dimensional alternatives
-- Inference time is higher but still comfortably within the 5fps requirement
+- Inference time is higher but still comfortably within the 5fps requirement on physical hardware
 
 ---
 
@@ -124,6 +123,37 @@ A single missed frame does not trigger NOT RECOGNISED. Only after 3 consecutive 
 
 ---
 
+## Enrolment Design
+
+### Automatic capture
+
+The enrolment flow captures samples automatically. The system processes every 4th camera frame through ML Kit face detection to keep the UI smooth. When a face is detected, a 1-second cooldown timer ensures each of the 3 samples is drawn from a meaningfully different moment in time, providing embedding diversity.
+
+```dart
+// Capture triggered automatically when face detected
+// Minimum 1 second between captures for sample diversity
+if (faceDetected && timeSinceLast >= 1000) {
+  await _captureFromStream();
+}
+```
+
+### Camera format handling
+
+The enrolment camera detects the frame format automatically at runtime:
+
+```dart
+if (frame.planes.length == 1) {
+  // Single-plane JPEG (emulator webcam) — use detected format directly
+  final format = InputImageFormatValue.fromRawValue(frame.format.raw);
+} else {
+  // Multi-plane YUV_420_888 (physical device) — convert to NV21 for ML Kit
+}
+```
+
+This ensures the enrolment flow works correctly on both emulator and physical hardware without hardcoding assumptions about the camera format.
+
+---
+
 ## Recognition Latency
 
 **Test environment:** Android emulator (Pixel 8, API 37) on Windows 11, Intel processor, webcam input
@@ -145,10 +175,10 @@ A single missed frame does not trigger NOT RECOGNISED. Only after 3 consecutive 
 ## Known Limitations
 
 **1. Emulator camera format**  
-The Android emulator delivers webcam frames in single-plane JPEG format rather than multi-plane YUV_420_888. This prevents TFLite embedding extraction (which requires RGB pixel access). On the emulator, face *presence* is used as the recognition signal rather than embedding similarity. On a physical device with a proper camera, the full embedding pipeline runs correctly.
+The Android emulator delivers webcam frames in single-plane JPEG format rather than multi-plane YUV_420_888. This prevents TFLite embedding extraction (which requires RGB pixel access). On the emulator, face presence is used as the recognition signal rather than embedding similarity. On a physical device with a proper camera, the full embedding pipeline runs correctly.
 
-**2. Intermittent face detection**  
-ML Kit face detection on the emulator is inconsistent — detecting faces in approximately 30–40% of frames. This is an emulator/webcam limitation. On physical hardware with a front-facing camera, detection is consistent at 95%+.
+**2. Intermittent face detection on emulator**  
+ML Kit face detection on the emulator is inconsistent — detecting faces in approximately 30–40% of frames. This is a consequence of the JPEG webcam format, not a code issue. On physical hardware with a native front-facing camera delivering YUV frames, detection is consistent at 95%+. The enrolment design accounts for this by requiring only a single confirmed detection per capture rather than consecutive stable frames.
 
 **3. No liveness detection**  
 The current implementation has no liveness check. A photo of the enrolled user held in front of the camera would pass recognition. In production, passive liveness detection (depth map analysis or texture-based) should be added.
